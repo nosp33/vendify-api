@@ -4,3 +4,4 @@ módulos_nó
 .env.*
 npm-debug.log*
 .DS_Store
+routes/.env
