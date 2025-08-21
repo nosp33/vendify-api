@@ -6,10 +6,11 @@ export default {
     version: "1.0.0",
     description: "Documentação da API (clientes, produtos, vendas)."
   },
-  servers: [
-    { url: "http://localhost:3000", description: "Local" },
-    { url: "https://SEU-DOMINIO-OU-URL-DO-RENDER", description: "Produção" }
-  ],
+servers: [
+  { url: "http://localhost:3000", description: "Local" },
+  { url: "https://vendify-api-7k7k.onrender.com", description: "Produção" }
+],
+
   tags: [
     { name: "Health" }, { name: "Produtos" }, { name: "Clientes" }, { name: "Vendas" }
   ],
