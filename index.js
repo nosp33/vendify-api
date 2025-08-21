@@ -9,6 +9,11 @@ import { randomUUID } from 'node:crypto';
 import swaggerUi from 'swagger-ui-express';
 import openapi from './openapi.js';
 
+// rotas (import estático – dispensa top-level await)
+import clientesRoutes from './routes/clientes.js';
+import produtosRoutes from './routes/produtos.js';
+import vendasRoutes   from './routes/vendas.js';
+
 // ===== app =====
 const app = express();
 app.set('trust proxy', 1); // IP correto atrás de proxy (Render/Railway/etc.)
@@ -26,7 +31,7 @@ app.use(cors({
       ? cb(null, true)
       : cb(new Error(`Origin não permitida: ${origin}`));
   },
-  methods: ['GET','POST','PUT','DELETE','OPTIONS'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
 }));
@@ -56,9 +61,12 @@ app.use(limiter);
 
 // ===== raiz/health =====
 app.get('/', (_req, res) =>
-  res.status(200).send('Vendify API ✅ Use /health, /docs, /clientes, /produtos, /vendas')
+  res
+    .status(200)
+    .send('Vendify API ✅ Use /health, /saúde, /docs, /clientes, /produtos, /vendas')
 );
 
+// health “oficial”
 app.get('/health', (_req, res) =>
   res.json({
     ok: true,
@@ -69,19 +77,24 @@ app.get('/health', (_req, res) =>
     supabase: {
       SUPABASE_URL: !!process.env.SUPABASE_URL,
       SUPABASE_SERVICE_ROLE_KEY: !!process.env.SUPABASE_SERVICE_ROLE_KEY
-    }
+    },
+    ts: new Date().toISOString()
   })
 );
 
-// ===== docs (Swagger) — logo após /health e ANTES das rotas/404 =====
+// alias em PT-BR (mantém compatibilidade com testes/logs antigos)
+app.get('/saúde', (_req, res) => res.redirect(307, '/health'));
+
+// ping diagnóstico
+app.post('/ping', (req, res) => {
+  res.json({ ok: true, got: req.body ?? null, ts: new Date().toISOString() });
+});
+
+// ===== docs (Swagger) =====
 app.use('/docs', swaggerUi.serve, swaggerUi.setup(openapi, { explorer: true }));
-app.get('/docs.json', (_req, res) => res.json(openapi)); // opcional: JSON da spec
+app.get('/docs.json', (_req, res) => res.json(openapi)); // JSON da spec
 
 // ===== rotas da API =====
-const { default: clientesRoutes } = await import('./routes/clientes.js');
-const { default: produtosRoutes } = await import('./routes/produtos.js');
-const { default: vendasRoutes }   = await import('./routes/vendas.js');
-
 app.use('/clientes', clientesRoutes);
 app.use('/produtos', produtosRoutes);
 app.use('/vendas', vendasRoutes);
@@ -103,6 +116,10 @@ app.use((err, req, res, _next) => {
     request_id: req.id || null
   });
 });
+
+// ===== robustez de processo =====
+process.on('unhandledRejection', (e) => console.error('unhandledRejection:', e));
+process.on('uncaughtException', (e) => console.error('uncaughtException:', e));
 
 // ===== sobe servidor =====
 const PORT = process.env.PORT || 3000;

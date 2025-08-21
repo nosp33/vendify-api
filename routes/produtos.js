@@ -1,94 +1,144 @@
-// routes/produtos.js
-import express from 'express';
-import { createClient } from '@supabase/supabase-js';
-import { validate } from '../lib/validate.js';
-import { produtoCreate, produtoUpdate } from '../schemas.js';
+// routes/produtos.js — produção
+import { Router } from 'express';
+import { z } from 'zod';
+import { supabase } from '../lib/supabase.js';
 
-const router = express.Router();
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+const router = Router();
 
-const SAFE_ORDER = new Set(['created_at','updated_at','nome','preco','estoque','ativo','id']);
-const parseOrder = (order) => {
-  if (!order) return { column: 'created_at', ascending: false };
-  const [c, d='asc'] = String(order).split('.');
-  return { column: SAFE_ORDER.has(c) ? c : 'created_at', ascending: d.toLowerCase() !== 'desc' };
-};
-const paginate = (p,l) => {
-  const page = Math.max(parseInt(p||'1',10)||1,1);
-  const limit = Math.min(Math.max(parseInt(l||'20',10)||20,1),100);
-  const from = (page-1)*limit; const to = from+limit-1;
-  return { page, limit, from, to };
-};
+// ===== Schemas =====
+const uuidSchema = z.string().uuid('id inválido');
 
-router.get('/', async (req, res) => {
+const produtoCreateSchema = z.object({
+  nome: z.string().min(1, 'nome é obrigatório'),
+  sku: z.string().min(1, 'sku é obrigatório'),
+  preco: z.number({ invalid_type_error: 'preco deve ser número' }),
+  estoque: z.number({ invalid_type_error: 'estoque deve ser número' }).int('estoque deve ser inteiro'),
+  descricao: z.string().optional(),
+  ativo: z.boolean().default(true)
+});
+
+const produtoUpdateSchema = z.object({
+  nome: z.string().min(1).optional(),
+  sku: z.string().min(1).optional(),
+  preco: z.number().optional(),
+  estoque: z.number().int().optional(),
+  descricao: z.string().nullable().optional(),
+  ativo: z.boolean().optional(),
+}).refine(obj => Object.keys(obj).length > 0, { message: 'corpo vazio' });
+
+// ===== Helpers =====
+function mapDbErrorToHttp(error) {
+  // Postgres unique violation
+  if (error?.code === '23505') return { status: 409, msg: 'SKU já existe' };
+  // PostgREST codes (ex.: PGRST204 coluna não existe etc.)
+  if (String(error?.code || '').startsWith('PGRST')) return { status: 400, msg: 'Erro de validação no banco' };
+  return { status: 500, msg: 'Erro interno' };
+}
+
+// ===== GET /produtos =====
+router.get('/', async (_req, res, next) => {
   try {
-    const { search, ativo, min_price, max_price, include_deleted, only_deleted, order, page, limit } = req.query;
-    const { column, ascending } = parseOrder(order);
-    const { from, to, page: p, limit: l } = paginate(page, limit);
-    let q = supabase.from('produtos').select('*', { count: 'exact' });
+    const { data, error } = await supabase
+      .from('produtos')
+      .select('*')
+      .is('deleted_at', null)
+      .order('created_at', { ascending: false });
 
-    if (only_deleted === 'true') q = q.not('deleted_at','is',null);
-    else if (include_deleted === 'true') {/*no-op*/}
-    else q = q.is('deleted_at', null);
-
-    if (search) q = q.ilike('nome', `%${search}%`);
-    if (ativo === 'true') q = q.eq('ativo', true);
-    if (ativo === 'false') q = q.eq('ativo', false);
-
-    const minP = Number.isFinite(+min_price) ? +min_price : undefined;
-    const maxP = Number.isFinite(+max_price) ? +max_price : undefined;
-    if (minP !== undefined) q = q.gte('preco', minP);
-    if (maxP !== undefined) q = q.lte('preco', maxP);
-
-    const { data, error, count } = await q.order(column, { ascending }).range(from, to);
-    if (error) return res.status(500).json({ error: error.message });
-    res.json({ data, meta: { total: count ?? 0, page: p, limit: l, order: { column, ascending } } });
-  } catch { res.status(500).json({ error: 'Erro inesperado ao listar produtos.' }); }
+    if (error) return next(error);
+    return res.json(data);
+  } catch (err) {
+    return next(err);
+  }
 });
 
+// ===== GET /produtos/:id =====
 router.get('/:id', async (req, res) => {
-  const { id } = req.params; const { include_deleted } = req.query;
-  let q = supabase.from('produtos').select('*').eq('id', id);
-  if (include_deleted === 'true') {} else q = q.is('deleted_at', null);
-  const { data, error } = await q.single();
-  if (error?.code === 'PGRST116') return res.status(404).json({ error: 'Produto não encontrado.' });
-  if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
+  const parse = uuidSchema.safeParse(req.params.id);
+  if (!parse.success) return res.status(400).json({ error: parse.error.issues[0].message });
+
+  const { data, error } = await supabase
+    .from('produtos')
+    .select('*')
+    .eq('id', parse.data)
+    .is('deleted_at', null)
+    .single();
+
+  if (error && error.code === 'PGRST116') return res.status(404).json({ error: 'Produto não encontrado' }); // no rows
+  if (error) return res.status(500).json({ error: 'Erro ao buscar' });
+
+  return res.json(data);
 });
 
-router.post('/', validate(produtoCreate), async (req, res) => {
-  const { data, error } = await supabase.from('produtos').insert(req.body).select('*').single();
-  if (error) return res.status(500).json({ error: error.message });
-  res.status(201).json(data);
+// ===== POST /produtos =====
+router.post('/', async (req, res) => {
+  const parsed = produtoCreateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    const first = parsed.error.issues[0];
+    return res.status(400).json({ error: first?.message || 'payload inválido' });
+  }
+
+  const payload = parsed.data;
+  const { data, error } = await supabase
+    .from('produtos')
+    .insert(payload)
+    .select('*')
+    .single();
+
+  if (error) {
+    const mapped = mapDbErrorToHttp(error);
+    req.log?.warn({ err: error, payload }, 'POST /produtos falhou');
+    return res.status(mapped.status).json({ error: mapped.msg });
+  }
+
+  return res.status(201).json(data);
 });
 
-router.put('/:id', validate(produtoUpdate), async (req, res) => {
-  const { id } = req.params;
-  const body = { ...req.body, updated_at: new Date().toISOString() };
-  const { data, error } = await supabase.from('produtos')
-    .update(body).eq('id', id).is('deleted_at', null).select('*').single();
-  if (error?.code === 'PGRST116') return res.status(404).json({ error: 'Produto não encontrado para atualizar.' });
-  if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
+// ===== PUT /produtos/:id =====
+router.put('/:id', async (req, res) => {
+  const idParse = uuidSchema.safeParse(req.params.id);
+  if (!idParse.success) return res.status(400).json({ error: idParse.error.issues[0].message });
+
+  const bodyParse = produtoUpdateSchema.safeParse(req.body);
+  if (!bodyParse.success) {
+    const first = bodyParse.error.issues[0];
+    return res.status(400).json({ error: first?.message || 'payload inválido' });
+  }
+
+  const { data, error } = await supabase
+    .from('produtos')
+    .update(bodyParse.data)
+    .eq('id', idParse.data)
+    .is('deleted_at', null)
+    .select('*')
+    .single();
+
+  if (error && error.code === 'PGRST116') return res.status(404).json({ error: 'Produto não encontrado' });
+  if (error) {
+    const mapped = mapDbErrorToHttp(error);
+    req.log?.warn({ err: error, body: bodyParse.data }, 'PUT /produtos falhou');
+    return res.status(mapped.status).json({ error: mapped.msg });
+  }
+
+  return res.json(data);
 });
 
+// ===== DELETE /produtos/:id (soft delete) =====
 router.delete('/:id', async (req, res) => {
-  const { id } = req.params;
-  const { error } = await supabase.from('produtos')
-    .update({ deleted_at: new Date().toISOString() }).eq('id', id).is('deleted_at', null);
-  if (error?.code === 'PGRST116') return res.status(404).json({ error: 'Produto não encontrado para excluir.' });
-  if (error) return res.status(500).json({ error: error.message });
-  res.status(204).send();
-});
+  const parse = uuidSchema.safeParse(req.params.id);
+  if (!parse.success) return res.status(400).json({ error: parse.error.issues[0].message });
 
-router.post('/:id/restore', async (req, res) => {
-  const { id } = req.params;
-  const { data, error } = await supabase.from('produtos')
-    .update({ deleted_at: null, updated_at: new Date().toISOString() })
-    .eq('id', id).not('deleted_at','is',null).select('*').single();
-  if (error?.code === 'PGRST116') return res.status(404).json({ error: 'Produto não encontrado para restaurar.' });
-  if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
+  const { data, error } = await supabase
+    .from('produtos')
+    .update({ deleted_at: new Date().toISOString() })
+    .eq('id', parse.data)
+    .is('deleted_at', null)
+    .select('id')
+    .single();
+
+  if (error && error.code === 'PGRST116') return res.status(404).json({ error: 'Produto não encontrado' });
+  if (error) return res.status(500).json({ error: 'Erro ao deletar' });
+
+  return res.status(204).send();
 });
 
 export default router;

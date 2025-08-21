@@ -1,0 +1,38 @@
+# render.yaml
+services:
+  - type: web
+    name: vendify-api
+    runtime: node
+    repo: https://github.com/nosp33/ven​dify-api   # <- troque pela URL do seu repo
+    rootDir: .
+    autoDeploy: true
+    plan: free
+    buildCommand: npm ci
+    startCommand: node index.js
+    healthCheckPath: /health
+
+    envVars:
+      # Render define PORT automaticamente; seu app já usa process.env.PORT. Não defina PORT aqui.
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: 22.18.0            # ou 20.x (LTS). Se preferir, remova e use "engines" no package.json.
+      - key: FRONTEND_URL
+        value: https://seu-front.onrender.com   # troque pelo domínio do seu front quando tiver
+      - key: RATE_LIMIT_WINDOW_MS
+        value: "900000"
+      - key: RATE_LIMIT_MAX
+        value: "300"
+
+      # Importa variáveis do grupo seguro (preenchidas no Render)
+      - fromGroup: vendify-secrets
+
+envVarGroups:
+  - name: vendify-secrets
+    envVars:
+      - key: SUPABASE_URL
+        sync: false   # o Render vai pedir o valor quando aplicar o blueprint
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
